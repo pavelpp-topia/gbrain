@@ -37,6 +37,7 @@ import {
   isTokenLimitError,
   __setEmbedTransportForTests,
   __getShrinkStateForTests,
+  __setEmbedTuningForTests,
 } from '../../src/core/ai/gateway.ts';
 import { AIConfigError, AITransientError } from '../../src/core/ai/errors.ts';
 
@@ -412,5 +413,161 @@ describe('startup warning for recipes missing max_batch_tokens', () => {
     expect(warnings.find(w => w.includes('"voyage"'))).toBeUndefined();
     expect(warnings.find(w => w.includes('"openai"'))).toBeUndefined();
     expect(warnings.find(w => w.includes('"google"'))).toBeDefined();
+  });
+});
+
+// --------- 8. Topia self-hosted TEI: env token-budget override + concurrent dispatch ---------
+//
+// These tests cover the two changes added in the topia fork:
+//
+//   A. GBRAIN_EMBED_MAX_BATCH_TOKENS: lets a self-hosted embedder declare its
+//      per-request token budget even when the recipe (ollama/openai-compat)
+//      has no max_batch_tokens. Without this, 40-chunk pages are sent as one
+//      ~15k-token request and TEI hangs until the client timeout fires.
+//
+//   B. GBRAIN_EMBED_HTTP_CONCURRENCY: the split sub-batches now fire
+//      concurrently (Promise.all) instead of sequentially, bounded by a global
+//      semaphore so we don't overwhelm the server. Output order is preserved.
+
+describe('topia: env token-budget override (GBRAIN_EMBED_MAX_BATCH_TOKENS)', () => {
+  beforeEach(() => resetGateway());
+  afterEach(() => {
+    __setEmbedTransportForTests(null);
+    __setEmbedTuningForTests(null);
+  });
+
+  test('ollama recipe (no max_batch_tokens) pre-splits when override is set', async () => {
+    // Ollama has no_batch_cap + no max_batch_tokens. With the override set to
+    // 400 tokens (chars_per_token=4 → 1600 char budget), 4 texts of 500 chars
+    // each should split 2+2 (500*4/4=500tok each; two fit in 400tok budget? No
+    // — each is 500/4=125tok, so all 4 fit. Use chars_per_token=1 to make the
+    // math obvious: 4 texts of 500 chars, budget 600 chars → 1+1+1+1 batches.
+    configureGateway({
+      embedding_model: 'ollama:jina-embeddings-v2-base-code',
+      embedding_dimensions: 768,
+      env: {},
+    });
+    __setEmbedTuningForTests({ maxBatchTokensOverride: 600, charsPerTokenOverride: 1, httpConcurrency: 1 });
+
+    const stub = mock(async ({ values }: { values: string[] }) => fakeEmbeddings(values, 768));
+    __setEmbedTransportForTests(stub as any);
+
+    const texts = ['a'.repeat(500), 'b'.repeat(500), 'c'.repeat(500), 'd'.repeat(500)];
+    const result = await embed(texts);
+
+    // Each 500-char text = 500 tokens at chars_per_token=1; budget 600 →
+    // each goes in its own batch (one would overflow two together).
+    expect(stub.mock.calls.length).toBeGreaterThanOrEqual(2);
+    expect(result).toHaveLength(4);
+  });
+
+  test('output order preserved across concurrent sub-batches', async () => {
+    configureGateway({
+      embedding_model: 'ollama:jina-embeddings-v2-base-code',
+      embedding_dimensions: 768,
+      env: {},
+    });
+    // budget=300 chars (chars_per_token=1) → 3 texts of 200 chars → 1+1+1
+    __setEmbedTuningForTests({ maxBatchTokensOverride: 300, charsPerTokenOverride: 1, httpConcurrency: 4 });
+
+    // Stub returns embeddings where slot[0] = global call-order index so we
+    // can distinguish which sub-batch result landed in which position.
+    let callIdx = 0;
+    const stub = mock(async ({ values }: { values: string[] }) => {
+      const idx = callIdx++;
+      return {
+        embeddings: values.map(() => Array.from({ length: 768 }, (_, j) => j === 0 ? idx : 0)),
+      };
+    });
+    __setEmbedTransportForTests(stub as any);
+
+    const texts = ['a'.repeat(200), 'b'.repeat(200), 'c'.repeat(200)];
+    const result = await embed(texts);
+
+    // 3 sub-batches of 1 each. The results must be in input order (0,1,2)
+    // regardless of which call resolved first.
+    expect(result).toHaveLength(3);
+    const slotZero = result.map(v => v[0]);
+    expect(slotZero).toEqual([0, 1, 2]);
+  });
+
+  test('without override, ollama recipe still takes the single-call fast path', async () => {
+    configureGateway({
+      embedding_model: 'ollama:jina-embeddings-v2-base-code',
+      embedding_dimensions: 768,
+      env: {},
+    });
+    __setEmbedTuningForTests({ maxBatchTokensOverride: undefined, httpConcurrency: 1 });
+
+    const stub = mock(async ({ values }: { values: string[] }) => fakeEmbeddings(values, 768));
+    __setEmbedTransportForTests(stub as any);
+
+    const texts = Array.from({ length: 20 }, (_, i) => `chunk-${i}`);
+    await embed(texts);
+
+    // No pre-split: all 20 in one call.
+    expect(stub).toHaveBeenCalledTimes(1);
+    expect((stub.mock.calls[0][0] as { values: string[] }).values).toHaveLength(20);
+  });
+});
+
+describe('topia: concurrent sub-batch dispatch (GBRAIN_EMBED_HTTP_CONCURRENCY)', () => {
+  beforeEach(() => resetGateway());
+  afterEach(() => {
+    __setEmbedTransportForTests(null);
+    __setEmbedTuningForTests(null);
+  });
+
+  test('semaphore limits concurrent in-flight calls to httpConcurrency', async () => {
+    configureGateway({
+      embedding_model: 'ollama:jina-embeddings-v2-base-code',
+      embedding_dimensions: 768,
+      env: {},
+    });
+    // 5 sub-batches but max 2 concurrent — verify max concurrency is respected.
+    __setEmbedTuningForTests({ maxBatchTokensOverride: 100, charsPerTokenOverride: 1, httpConcurrency: 2 });
+
+    let concurrent = 0;
+    let maxSeen = 0;
+    const stub = mock(async ({ values }: { values: string[] }) => {
+      concurrent++;
+      maxSeen = Math.max(maxSeen, concurrent);
+      // Yield to the event loop so other pending calls can start.
+      await new Promise(r => setTimeout(r, 0));
+      concurrent--;
+      return fakeEmbeddings(values, 768);
+    });
+    __setEmbedTransportForTests(stub as any);
+
+    // 5 texts of 80 chars each; budget=100 chars → 5 sub-batches of 1.
+    const texts = Array.from({ length: 5 }, () => 'x'.repeat(80));
+    await embed(texts);
+
+    expect(maxSeen).toBeLessThanOrEqual(2);
+    expect(stub).toHaveBeenCalledTimes(5);
+  });
+
+  test('httpConcurrency=1 (default) behaves like the original sequential loop', async () => {
+    configureGateway({
+      embedding_model: 'ollama:jina-embeddings-v2-base-code',
+      embedding_dimensions: 768,
+      env: {},
+    });
+    __setEmbedTuningForTests({ maxBatchTokensOverride: 100, charsPerTokenOverride: 1, httpConcurrency: 1 });
+
+    const callOrder: number[] = [];
+    const stub = mock(async ({ values }: { values: string[] }) => {
+      callOrder.push(callOrder.length);
+      await new Promise(r => setTimeout(r, 0));
+      return fakeEmbeddings(values, 768);
+    });
+    __setEmbedTransportForTests(stub as any);
+
+    const texts = Array.from({ length: 3 }, () => 'x'.repeat(80));
+    const result = await embed(texts);
+
+    expect(stub).toHaveBeenCalledTimes(3);
+    expect(result).toHaveLength(3);
+    expect(callOrder).toEqual([0, 1, 2]);
   });
 });
