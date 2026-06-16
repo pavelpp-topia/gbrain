@@ -1498,7 +1498,16 @@ export async function embed(texts: string[], opts?: EmbedOpts): Promise<Float32A
   const resolveTarget = opts?.embeddingModel ?? getEmbeddingModel();
   const tracker = __budgetStore.getStore() ?? null;
   const { model, recipe, modelId } = await resolveEmbeddingProvider(resolveTarget);
-  const truncated = texts.map(t => (t ?? '').slice(0, MAX_CHARS));
+  // topia: when a per-request token budget is declared via env override, also
+  // cap individual texts to that budget (in chars) so a single oversized chunk
+  // never gets sent as a sub-batch of 1 that exceeds TEI's max_batch_tokens and
+  // hangs. Without this cap, token-split puts such a chunk in its own sub-batch
+  // of 1 which still hangs. With it, the chunk is silently truncated to fit —
+  // same semantics as MAX_CHARS but aligned with the declared batch budget.
+  const perTextMaxChars = _embedTuning.maxBatchTokensOverride !== undefined
+    ? Math.min(MAX_CHARS, Math.floor(_embedTuning.maxBatchTokensOverride * (_embedTuning.charsPerTokenOverride ?? DEFAULT_CHARS_PER_TOKEN)))
+    : MAX_CHARS;
+  const truncated = texts.map(t => (t ?? '').slice(0, perTextMaxChars));
 
   // Reserve up front for the worst-case batch token count. Embeddings have
   // no output rate, so maxOutputTokens=0. record() at the end uses the
