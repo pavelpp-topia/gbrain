@@ -112,10 +112,15 @@ const _embedTuning: {
   maxBatchTokensOverride: number | undefined;
   charsPerTokenOverride: number | undefined;
   httpConcurrency: number;
+  maxCharsPerTextOverride: number | undefined;
 } = {
   maxBatchTokensOverride: resolveIntEnv('GBRAIN_EMBED_MAX_BATCH_TOKENS'),
   charsPerTokenOverride: resolveIntEnv('GBRAIN_EMBED_CHARS_PER_TOKEN'),
   httpConcurrency: resolveIntEnv('GBRAIN_EMBED_HTTP_CONCURRENCY') ?? 1,
+  // Direct char cap per input text — skips token-math entirely. Set this to a
+  // known-safe value (e.g. 1024) when chars_per_token estimates are unreliable
+  // for the target language/model. Takes precedence over the computed cap.
+  maxCharsPerTextOverride: resolveIntEnv('GBRAIN_EMBED_MAX_CHARS_PER_TEXT'),
 };
 
 // Process-global hand-off semaphore bounding concurrent embed sub-batch HTTP
@@ -675,15 +680,18 @@ export function __setEmbedTuningForTests(overrides: {
   maxBatchTokensOverride?: number;
   charsPerTokenOverride?: number;
   httpConcurrency?: number;
+  maxCharsPerTextOverride?: number;
 } | null): void {
   if (overrides === null) {
     _embedTuning.maxBatchTokensOverride = resolveIntEnv('GBRAIN_EMBED_MAX_BATCH_TOKENS');
     _embedTuning.charsPerTokenOverride = resolveIntEnv('GBRAIN_EMBED_CHARS_PER_TOKEN');
     _embedTuning.httpConcurrency = resolveIntEnv('GBRAIN_EMBED_HTTP_CONCURRENCY') ?? 1;
+    _embedTuning.maxCharsPerTextOverride = resolveIntEnv('GBRAIN_EMBED_MAX_CHARS_PER_TEXT');
   } else {
     if (overrides.maxBatchTokensOverride !== undefined) _embedTuning.maxBatchTokensOverride = overrides.maxBatchTokensOverride;
     if (overrides.charsPerTokenOverride !== undefined) _embedTuning.charsPerTokenOverride = overrides.charsPerTokenOverride;
     if (overrides.httpConcurrency !== undefined) _embedTuning.httpConcurrency = overrides.httpConcurrency;
+    if (overrides.maxCharsPerTextOverride !== undefined) _embedTuning.maxCharsPerTextOverride = overrides.maxCharsPerTextOverride;
   }
   // Reset the semaphore to the new concurrency limit.
   _embedInFlight = 0;
@@ -1498,15 +1506,23 @@ export async function embed(texts: string[], opts?: EmbedOpts): Promise<Float32A
   const resolveTarget = opts?.embeddingModel ?? getEmbeddingModel();
   const tracker = __budgetStore.getStore() ?? null;
   const { model, recipe, modelId } = await resolveEmbeddingProvider(resolveTarget);
-  // topia: when a per-request token budget is declared via env override, also
-  // cap individual texts to that budget (in chars) so a single oversized chunk
-  // never gets sent as a sub-batch of 1 that exceeds TEI's max_batch_tokens and
-  // hangs. Without this cap, token-split puts such a chunk in its own sub-batch
-  // of 1 which still hangs. With it, the chunk is silently truncated to fit —
-  // same semantics as MAX_CHARS but aligned with the declared batch budget.
-  const perTextMaxChars = _embedTuning.maxBatchTokensOverride !== undefined
-    ? Math.min(MAX_CHARS, Math.floor(_embedTuning.maxBatchTokensOverride * (_embedTuning.charsPerTokenOverride ?? DEFAULT_CHARS_PER_TOKEN)))
-    : MAX_CHARS;
+  // topia: when a per-request token budget is declared via env override, cap
+  // individual texts so no single input can exceed TEI's max_batch_tokens and
+  // hang. The cap is computed from the budget with the effective safety factor
+  // applied (same shrink-aware factor used for batch splitting), so tokenizer
+  // variance doesn't push a truncated text over the budget on arrival.
+  // GBRAIN_EMBED_MAX_CHARS_PER_TEXT can override this directly (no token math)
+  // for operators who know the safe char ceiling empirically (e.g. "1024").
+  let perTextMaxChars: number = MAX_CHARS;
+  if (_embedTuning.maxCharsPerTextOverride !== undefined) {
+    perTextMaxChars = _embedTuning.maxCharsPerTextOverride;
+  } else if (_embedTuning.maxBatchTokensOverride !== undefined) {
+    const sf = effectiveSafetyFactor(recipe); // shrink-aware; default 0.8
+    perTextMaxChars = Math.min(
+      MAX_CHARS,
+      Math.floor(_embedTuning.maxBatchTokensOverride * sf * (_embedTuning.charsPerTokenOverride ?? DEFAULT_CHARS_PER_TOKEN)),
+    );
+  }
   const truncated = texts.map(t => (t ?? '').slice(0, perTextMaxChars));
 
   // Reserve up front for the worst-case batch token count. Embeddings have
