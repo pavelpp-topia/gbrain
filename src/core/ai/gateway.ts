@@ -81,10 +81,12 @@ const AI_MULTIMODAL_TIMEOUT_MS = resolveAiTimeoutMs('GBRAIN_AI_MULTIMODAL_TIMEOU
 // ---------------------------------------------------------------------------
 // Embed sub-batch concurrency.
 //
-// _embedHttpConcurrency bounds concurrent sub-batch HTTP calls across the
-// whole process. Set via brain config embed.http_concurrency (normal path)
-// or GBRAIN_EMBED_HTTP_CONCURRENCY env var (incident-time override; env wins).
-// Default 1 preserves the prior sequential behaviour.
+// _embedHttpConcurrency limits concurrent sub-batch HTTP calls within any
+// multi-batch embed() call (i.e. when a recipe declares max_batch_tokens and
+// the input splits into >1 sub-batch). Single-batch calls skip the semaphore
+// entirely (fast path). Set via brain config embed.http_concurrency (normal
+// path) or GBRAIN_EMBED_HTTP_CONCURRENCY env var (incident-time override;
+// env wins). Default 1 preserves the prior sequential behaviour.
 // ---------------------------------------------------------------------------
 function resolveIntEnv(envVar: string): number | undefined {
   const raw = process.env[envVar];
