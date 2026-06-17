@@ -20,7 +20,7 @@ export const jina: Recipe = {
   auth_env: {
     required: [],
     optional: ['JINA_BASE_URL', 'JINA_API_KEY'],
-    setup_url: 'https://huggingface.co/jinaai',
+    setup_url: 'https://github.com/huggingface/text-embeddings-inference',
   },
   touchpoints: {
     embedding: {
@@ -31,6 +31,8 @@ export const jina: Recipe = {
         'jina-embeddings-v3',
       ],
       user_provided_models: true,
+      // v2 models output 768 dims. jina-embeddings-v3 outputs 1024 dims —
+      // pass --embedding-dimensions 1024 explicitly when using v3.
       default_dims: 768,
       cost_per_1m_tokens_usd: 0,
       price_last_verified: '2026-06-17',
