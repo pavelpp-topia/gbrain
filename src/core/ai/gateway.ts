@@ -1522,7 +1522,6 @@ export async function embed(texts: string[], opts?: EmbedOpts): Promise<Float32A
   // no output rate, so maxOutputTokens=0. record() at the end uses the
   // actual total reported by the SDK across all sub-batches.
   if (tracker) {
-    const charsPerToken = recipe.touchpoints?.embedding?.chars_per_token ?? DEFAULT_CHARS_PER_TOKEN;
     const totalChars = truncated.reduce((s, t) => s + t.length, 0);
     const estimatedInputTokens = Math.ceil(totalChars / Math.max(charsPerToken, 1));
     tracker.reserve({
