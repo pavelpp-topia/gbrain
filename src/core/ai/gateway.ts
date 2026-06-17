@@ -79,28 +79,12 @@ const AI_EMBED_TIMEOUT_MS = resolveAiTimeoutMs('GBRAIN_AI_EMBED_TIMEOUT_MS', 60_
 const AI_MULTIMODAL_TIMEOUT_MS = resolveAiTimeoutMs('GBRAIN_AI_MULTIMODAL_TIMEOUT_MS', 60_000);
 
 // ---------------------------------------------------------------------------
-// Self-hosted-embedder throughput tuning (topia fork).
+// Embed sub-batch concurrency.
 //
-// The Ollama / openai-compatible path can be pointed at a self-hosted
-// text-embeddings-inference (TEI) server that enforces a fixed
-// `max-batch-tokens` and serves N replicas. Upstream gbrain only token-splits
-// when the RECIPE declares `max_batch_tokens` (Voyage), and dispatches the
-// resulting sub-batches strictly sequentially. On a self-hosted embedder that
-// means (a) a whole page's chunks are sent as ONE over-budget request → the
-// server hangs, and (b) even when split, requests fire one-at-a-time → a single
-// replica works while the rest sit idle.
-//
-// These three knobs fix both without touching the shared recipe semantics:
-//   * GBRAIN_EMBED_MAX_BATCH_TOKENS — supply the per-request token budget the
-//     recipe lacks, so embed() pre-splits via splitByTokenBudget.
-//   * GBRAIN_EMBED_CHARS_PER_TOKEN — conservative char density for the token
-//     estimate (code ≈ 3, English ≈ 4); lower = smaller, safer sub-batches.
-//   * GBRAIN_EMBED_HTTP_CONCURRENCY — max concurrent sub-batch HTTP calls
-//     across the WHOLE process, so per-page fan-out AND the --stale page pool
-//     together saturate the replicas without overwhelming them. Default 1 keeps
-//     the prior strictly-sequential behavior (opt-in).
-//
-// Resolved from env ONCE at module load (Codex C3: never read env at call time).
+// _embedHttpConcurrency bounds concurrent sub-batch HTTP calls across the
+// whole process. Set via brain config embed.http_concurrency (normal path)
+// or GBRAIN_EMBED_HTTP_CONCURRENCY env var (incident-time override; env wins).
+// Default 1 preserves the prior sequential behaviour.
 // ---------------------------------------------------------------------------
 function resolveIntEnv(envVar: string): number | undefined {
   const raw = process.env[envVar];
@@ -108,34 +92,21 @@ function resolveIntEnv(envVar: string): number | undefined {
   const n = Number(raw);
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : undefined;
 }
-const _embedTuning: {
-  maxBatchTokensOverride: number | undefined;
-  charsPerTokenOverride: number | undefined;
-  httpConcurrency: number;
-  maxCharsPerTextOverride: number | undefined;
-} = {
-  maxBatchTokensOverride: resolveIntEnv('GBRAIN_EMBED_MAX_BATCH_TOKENS'),
-  charsPerTokenOverride: resolveIntEnv('GBRAIN_EMBED_CHARS_PER_TOKEN'),
-  httpConcurrency: resolveIntEnv('GBRAIN_EMBED_HTTP_CONCURRENCY') ?? 1,
-  // Direct char cap per input text — skips token-math entirely. Set this to a
-  // known-safe value (e.g. 1024) when chars_per_token estimates are unreliable
-  // for the target language/model. Takes precedence over the computed cap.
-  maxCharsPerTextOverride: resolveIntEnv('GBRAIN_EMBED_MAX_CHARS_PER_TEXT'),
-};
 
-// Process-global hand-off semaphore bounding concurrent embed sub-batch HTTP
-// calls at `_embedTuning.httpConcurrency`. acquire() takes a slot or queues;
-// release() hands the slot directly to the next waiter (count unchanged) or
-// frees it. Fair FIFO; no busy-wait.
+let _embedHttpConcurrency = 1;
+
+// Process-global FIFO semaphore bounding concurrent embed sub-batch HTTP
+// calls at `_embedHttpConcurrency`. acquire() takes a slot or queues;
+// release() hands the slot directly to the next waiter (count unchanged)
+// or frees it. Fair FIFO; no busy-wait.
 let _embedInFlight = 0;
 const _embedSlotWaiters: Array<() => void> = [];
 async function acquireEmbedSlot(): Promise<void> {
-  if (_embedInFlight < _embedTuning.httpConcurrency) {
+  if (_embedInFlight < _embedHttpConcurrency) {
     _embedInFlight++;
     return;
   }
   await new Promise<void>((resolve) => _embedSlotWaiters.push(resolve));
-  // Resumed by releaseEmbedSlot, which kept the in-flight count reserved for us.
 }
 function releaseEmbedSlot(): void {
   const next = _embedSlotWaiters.shift();
@@ -523,6 +494,11 @@ export function configureGateway(config: AIGatewayConfig): void {
     if (m) registerExtendedModel(m);
   }
   warnRecipesMissingBatchTokens();
+  // env var wins (incident-time override); config key is normal path; default 1.
+  _embedHttpConcurrency =
+    resolveIntEnv('GBRAIN_EMBED_HTTP_CONCURRENCY') ??
+    config.embed_http_concurrency ??
+    1;
 }
 
 /**
@@ -651,6 +627,7 @@ export function resetGateway(): void {
   _warnedRecipes.clear();
   _extendedModels.clear();
   // Reset semaphore state so tests don't leak concurrent-slot accounting.
+  _embedHttpConcurrency = 1;
   _embedInFlight = 0;
   _embedSlotWaiters.length = 0;
 }
@@ -670,30 +647,12 @@ export function __setEmbedTransportForTests(fn: EmbedManyFn | null): void {
 }
 
 /**
- * Test-only seam for the topia embed-tuning overrides. Lets tests drive
- * GBRAIN_EMBED_MAX_BATCH_TOKENS / GBRAIN_EMBED_HTTP_CONCURRENCY without
- * mutating process.env at module-load time.
- * Pass `null` to restore the module-load defaults.
+ * Test-only seam for embed concurrency. Pass a number to set the limit;
+ * pass null to restore the default (1). Resets semaphore state.
  * @internal
  */
-export function __setEmbedTuningForTests(overrides: {
-  maxBatchTokensOverride?: number;
-  charsPerTokenOverride?: number;
-  httpConcurrency?: number;
-  maxCharsPerTextOverride?: number;
-} | null): void {
-  if (overrides === null) {
-    _embedTuning.maxBatchTokensOverride = resolveIntEnv('GBRAIN_EMBED_MAX_BATCH_TOKENS');
-    _embedTuning.charsPerTokenOverride = resolveIntEnv('GBRAIN_EMBED_CHARS_PER_TOKEN');
-    _embedTuning.httpConcurrency = resolveIntEnv('GBRAIN_EMBED_HTTP_CONCURRENCY') ?? 1;
-    _embedTuning.maxCharsPerTextOverride = resolveIntEnv('GBRAIN_EMBED_MAX_CHARS_PER_TEXT');
-  } else {
-    if (overrides.maxBatchTokensOverride !== undefined) _embedTuning.maxBatchTokensOverride = overrides.maxBatchTokensOverride;
-    if (overrides.charsPerTokenOverride !== undefined) _embedTuning.charsPerTokenOverride = overrides.charsPerTokenOverride;
-    if (overrides.httpConcurrency !== undefined) _embedTuning.httpConcurrency = overrides.httpConcurrency;
-    if (overrides.maxCharsPerTextOverride !== undefined) _embedTuning.maxCharsPerTextOverride = overrides.maxCharsPerTextOverride;
-  }
-  // Reset the semaphore to the new concurrency limit.
+export function __setEmbedConcurrencyForTests(n: number | null): void {
+  _embedHttpConcurrency = n ?? 1;
   _embedInFlight = 0;
   _embedSlotWaiters.length = 0;
 }
@@ -1547,10 +1506,8 @@ export async function embed(texts: string[], opts?: EmbedOpts): Promise<Float32A
 
   // Pre-split is gated on maxBatchTokens. Recipes without it (e.g. OpenAI)
   // ride the fast path: one embedMany call, no recursion safety net.
-  // topia: env override lets self-hosted TEI declare a token budget even
-  // when the recipe (ollama/openai-compat) has no max_batch_tokens.
-  const maxBatchTokens = recipeBatchTokens ?? _embedTuning.maxBatchTokensOverride;
-  const batchCharsPerToken = embedding?.chars_per_token ?? _embedTuning.charsPerTokenOverride ?? DEFAULT_CHARS_PER_TOKEN;
+  const maxBatchTokens = recipeBatchTokens;
+  const batchCharsPerToken = embedding?.chars_per_token ?? DEFAULT_CHARS_PER_TOKEN;
   const batches = maxBatchTokens
     ? splitByTokenBudget(truncated, Math.floor(maxBatchTokens * effectiveSafetyFactor(recipe)), batchCharsPerToken)
     : [truncated];

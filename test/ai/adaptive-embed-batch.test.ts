@@ -37,7 +37,7 @@ import {
   isTokenLimitError,
   __setEmbedTransportForTests,
   __getShrinkStateForTests,
-  __setEmbedTuningForTests,
+  __setEmbedConcurrencyForTests,
 } from '../../src/core/ai/gateway.ts';
 import { AIConfigError, AITransientError } from '../../src/core/ai/errors.ts';
 
@@ -433,7 +433,7 @@ describe('topia: env token-budget override (GBRAIN_EMBED_MAX_BATCH_TOKENS)', () 
   beforeEach(() => resetGateway());
   afterEach(() => {
     __setEmbedTransportForTests(null);
-    __setEmbedTuningForTests(null);
+    __setEmbedConcurrencyForTests(null);
   });
 
   test('ollama recipe (no max_batch_tokens) pre-splits when override is set', async () => {
@@ -447,7 +447,7 @@ describe('topia: env token-budget override (GBRAIN_EMBED_MAX_BATCH_TOKENS)', () 
       embedding_dimensions: 768,
       env: {},
     });
-    __setEmbedTuningForTests({ maxBatchTokensOverride: 600, charsPerTokenOverride: 1, httpConcurrency: 1 });
+    __setEmbedConcurrencyForTests(1); // TODO(task4): maxBatchTokensOverride moved to recipe config
 
     const stub = mock(async ({ values }: { values: string[] }) => fakeEmbeddings(values, 768));
     __setEmbedTransportForTests(stub as any);
@@ -468,7 +468,7 @@ describe('topia: env token-budget override (GBRAIN_EMBED_MAX_BATCH_TOKENS)', () 
       env: {},
     });
     // budget=300 chars (chars_per_token=1) → 3 texts of 200 chars → 1+1+1
-    __setEmbedTuningForTests({ maxBatchTokensOverride: 300, charsPerTokenOverride: 1, httpConcurrency: 4 });
+    __setEmbedConcurrencyForTests(4); // TODO(task4): maxBatchTokensOverride moved to recipe config
 
     // Stub returns embeddings where slot[0] = global call-order index so we
     // can distinguish which sub-batch result landed in which position.
@@ -497,7 +497,7 @@ describe('topia: env token-budget override (GBRAIN_EMBED_MAX_BATCH_TOKENS)', () 
       embedding_dimensions: 768,
       env: {},
     });
-    __setEmbedTuningForTests({ maxBatchTokensOverride: undefined, httpConcurrency: 1 });
+    __setEmbedConcurrencyForTests(1); // TODO(task4): maxBatchTokensOverride moved to recipe config
 
     const stub = mock(async ({ values }: { values: string[] }) => fakeEmbeddings(values, 768));
     __setEmbedTransportForTests(stub as any);
@@ -515,7 +515,7 @@ describe('topia: concurrent sub-batch dispatch (GBRAIN_EMBED_HTTP_CONCURRENCY)',
   beforeEach(() => resetGateway());
   afterEach(() => {
     __setEmbedTransportForTests(null);
-    __setEmbedTuningForTests(null);
+    __setEmbedConcurrencyForTests(null);
   });
 
   test('semaphore limits concurrent in-flight calls to httpConcurrency', async () => {
@@ -525,7 +525,7 @@ describe('topia: concurrent sub-batch dispatch (GBRAIN_EMBED_HTTP_CONCURRENCY)',
       env: {},
     });
     // 5 sub-batches but max 2 concurrent — verify max concurrency is respected.
-    __setEmbedTuningForTests({ maxBatchTokensOverride: 100, charsPerTokenOverride: 1, httpConcurrency: 2 });
+    __setEmbedConcurrencyForTests(2); // TODO(task4): maxBatchTokensOverride moved to recipe config
 
     let concurrent = 0;
     let maxSeen = 0;
@@ -553,7 +553,7 @@ describe('topia: concurrent sub-batch dispatch (GBRAIN_EMBED_HTTP_CONCURRENCY)',
       embedding_dimensions: 768,
       env: {},
     });
-    __setEmbedTuningForTests({ maxBatchTokensOverride: 100, charsPerTokenOverride: 1, httpConcurrency: 1 });
+    __setEmbedConcurrencyForTests(1); // TODO(task4): maxBatchTokensOverride moved to recipe config
 
     const callOrder: number[] = [];
     const stub = mock(async ({ values }: { values: string[] }) => {

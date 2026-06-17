@@ -75,5 +75,6 @@ export function buildGatewayConfig(c: GBrainConfig): AIGatewayConfig {
         Object.entries(process.env).filter(([, v]) => v !== undefined && v !== ''),
       ),
     },
+    embed_http_concurrency: c.embed?.http_concurrency,
   };
 }
