@@ -1506,12 +1506,10 @@ export async function embed(texts: string[], opts?: EmbedOpts): Promise<Float32A
   );
   const expected = effectiveDims;
 
-  // Pre-split is gated on maxBatchTokens. Recipes without it (e.g. OpenAI)
-  // ride the fast path: one embedMany call, no recursion safety net.
-  const maxBatchTokens = recipeBatchTokens;
-  const batchCharsPerToken = embedding?.chars_per_token ?? DEFAULT_CHARS_PER_TOKEN;
-  const batches = maxBatchTokens
-    ? splitByTokenBudget(truncated, Math.floor(maxBatchTokens * effectiveSafetyFactor(recipe)), batchCharsPerToken)
+  // Pre-split is gated on the recipe token budget. Recipes without it (e.g.
+  // OpenAI) ride the fast path: one embedMany call, no recursion safety net.
+  const batches = recipeBatchTokens
+    ? splitByTokenBudget(truncated, Math.floor(recipeBatchTokens * effectiveSafetyFactor(recipe)), charsPerToken)
     : [truncated];
 
   const subResults: Float32Array[][] = new Array(batches.length);
@@ -1545,7 +1543,6 @@ export async function embed(texts: string[], opts?: EmbedOpts): Promise<Float32A
       // chars-per-token. On failure, A3 amended says charge the pessimistic
       // estimate too — embed has no output side, so the input estimate IS
       // the worst case.
-      const charsPerToken = recipe.touchpoints?.embedding?.chars_per_token ?? DEFAULT_CHARS_PER_TOKEN;
       const totalChars = truncated.reduce((s, t) => s + t.length, 0);
       const inputTokens = Math.ceil(totalChars / Math.max(charsPerToken, 1));
       try {
