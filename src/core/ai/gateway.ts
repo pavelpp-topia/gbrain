@@ -1506,23 +1506,16 @@ export async function embed(texts: string[], opts?: EmbedOpts): Promise<Float32A
   const resolveTarget = opts?.embeddingModel ?? getEmbeddingModel();
   const tracker = __budgetStore.getStore() ?? null;
   const { model, recipe, modelId } = await resolveEmbeddingProvider(resolveTarget);
-  // topia: when a per-request token budget is declared via env override, cap
-  // individual texts so no single input can exceed TEI's max_batch_tokens and
-  // hang. The cap is computed from the budget with the effective safety factor
-  // applied (same shrink-aware factor used for batch splitting), so tokenizer
-  // variance doesn't push a truncated text over the budget on arrival.
-  // GBRAIN_EMBED_MAX_CHARS_PER_TEXT can override this directly (no token math)
-  // for operators who know the safe char ceiling empirically (e.g. "1024").
-  let perTextMaxChars: number = MAX_CHARS;
-  if (_embedTuning.maxCharsPerTextOverride !== undefined) {
-    perTextMaxChars = _embedTuning.maxCharsPerTextOverride;
-  } else if (_embedTuning.maxBatchTokensOverride !== undefined) {
-    const sf = effectiveSafetyFactor(recipe); // shrink-aware; default 0.8
-    perTextMaxChars = Math.min(
-      MAX_CHARS,
-      Math.floor(_embedTuning.maxBatchTokensOverride * sf * (_embedTuning.charsPerTokenOverride ?? DEFAULT_CHARS_PER_TOKEN)),
-    );
-  }
+  // When the recipe declares a token budget, cap each text to fit within it.
+  // Without this, a single chunk exceeding max_batch_tokens lands in a
+  // sub-batch of 1 and still hangs the provider — splitting cannot help at
+  // the individual-text level. Fires for any recipe with max_batch_tokens.
+  const embedding = recipe.touchpoints?.embedding;
+  const recipeBatchTokens = embedding?.max_batch_tokens;
+  const charsPerToken = embedding?.chars_per_token ?? DEFAULT_CHARS_PER_TOKEN;
+  const perTextMaxChars = recipeBatchTokens !== undefined
+    ? Math.min(MAX_CHARS, Math.floor(recipeBatchTokens * effectiveSafetyFactor(recipe) * charsPerToken))
+    : MAX_CHARS;
   const truncated = texts.map(t => (t ?? '').slice(0, perTextMaxChars));
 
   // Reserve up front for the worst-case batch token count. Embeddings have
@@ -1553,16 +1546,14 @@ export async function embed(texts: string[], opts?: EmbedOpts): Promise<Float32A
   );
   const expected = effectiveDims;
 
-  const embedding = recipe.touchpoints?.embedding;
-  // topia: env override lets self-hosted TEI declare a token budget even
-  // when the recipe (ollama/openai-compat) has no max_batch_tokens.
-  const maxBatchTokens = embedding?.max_batch_tokens ?? _embedTuning.maxBatchTokensOverride;
-  const charsPerToken = embedding?.chars_per_token ?? _embedTuning.charsPerTokenOverride ?? DEFAULT_CHARS_PER_TOKEN;
-
   // Pre-split is gated on maxBatchTokens. Recipes without it (e.g. OpenAI)
   // ride the fast path: one embedMany call, no recursion safety net.
+  // topia: env override lets self-hosted TEI declare a token budget even
+  // when the recipe (ollama/openai-compat) has no max_batch_tokens.
+  const maxBatchTokens = recipeBatchTokens ?? _embedTuning.maxBatchTokensOverride;
+  const batchCharsPerToken = embedding?.chars_per_token ?? _embedTuning.charsPerTokenOverride ?? DEFAULT_CHARS_PER_TOKEN;
   const batches = maxBatchTokens
-    ? splitByTokenBudget(truncated, Math.floor(maxBatchTokens * effectiveSafetyFactor(recipe)), charsPerToken)
+    ? splitByTokenBudget(truncated, Math.floor(maxBatchTokens * effectiveSafetyFactor(recipe)), batchCharsPerToken)
     : [truncated];
 
   const subResults: Float32Array[][] = new Array(batches.length);

@@ -571,3 +571,71 @@ describe('topia: concurrent sub-batch dispatch (GBRAIN_EMBED_HTTP_CONCURRENCY)',
     expect(callOrder).toEqual([0, 1, 2]);
   });
 });
+
+// --------- 9. Per-text truncation from recipe token budget ---------
+//
+// When a recipe declares max_batch_tokens, embed() must cap each individual
+// text to (max_batch_tokens × safety_factor × chars_per_token) chars before
+// splitting. Without this, a single oversized chunk lands in a sub-batch of 1
+// and still hangs the provider — splitByTokenBudget operates at batch level,
+// not within a text. This fires for ANY recipe with max_batch_tokens, not
+// just Jina.
+
+describe('per-text truncation from recipe token budget', () => {
+  beforeEach(() => resetGateway());
+  afterEach(() => __setEmbedTransportForTests(null));
+
+  test('Jina recipe: texts longer than per-text budget are truncated before splitting', async () => {
+    // Jina: max_batch_tokens=2048, chars_per_token=1, safety_factor=0.5
+    // → perTextMaxChars = min(8000, floor(2048 * 0.5 * 1)) = 1024
+    configureGateway({
+      embedding_model: 'jina:jina-embeddings-v2-base-code',
+      embedding_dimensions: 768,
+      env: {},
+    });
+
+    const received: string[][] = [];
+    const stub = mock(async ({ values }: { values: string[] }) => {
+      received.push([...values]);
+      return { embeddings: values.map(() => new Array(768).fill(0.1)) };
+    });
+    __setEmbedTransportForTests(stub as any);
+
+    // 3 texts of 2000 chars each — all exceed the 1024-char per-text budget.
+    const texts = ['a'.repeat(2000), 'b'.repeat(2000), 'c'.repeat(2000)];
+    const result = await embed(texts);
+
+    expect(result).toHaveLength(3);
+    // Every text sent to the provider must be ≤ 1024 chars.
+    const allTexts = received.flat();
+    expect(allTexts).toHaveLength(3);
+    for (const t of allTexts) {
+      expect(t.length).toBeLessThanOrEqual(1024);
+    }
+  });
+
+  test('recipe with no max_batch_tokens: texts are not truncated below MAX_CHARS', async () => {
+    // OpenAI has no max_batch_tokens — fast path, no per-text budget cap.
+    configureGateway({
+      embedding_model: 'openai:text-embedding-3-large',
+      embedding_dimensions: 1536,
+      env: { OPENAI_API_KEY: 'sk-fake' },
+    });
+
+    const received: string[][] = [];
+    const stub = mock(async ({ values }: { values: string[] }) => {
+      received.push([...values]);
+      return { embeddings: values.map(() => new Array(1536).fill(0.1)) };
+    });
+    __setEmbedTransportForTests(stub as any);
+
+    // 3 texts of 2000 chars — under MAX_CHARS=8000, so no truncation.
+    const texts = ['a'.repeat(2000), 'b'.repeat(2000), 'c'.repeat(2000)];
+    await embed(texts);
+
+    const allTexts = received.flat();
+    for (const t of allTexts) {
+      expect(t.length).toBe(2000); // untouched
+    }
+  });
+});
