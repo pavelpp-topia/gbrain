@@ -294,21 +294,6 @@ describe('listSources', () => {
       expect(withPath?.remote_url).toBeNull();
     });
   });
-
-  test('exposes last_commit (sync completion bookmark; null before first sync)', async () => {
-    await withEnv2(async () => {
-      await addSource(engine, { id: 'bookmarked', localPath: '/tmp/p2' });
-      await engine.executeRaw(
-        `UPDATE sources SET last_commit = $1 WHERE id = $2`,
-        ['e18392de0da4413ce33bd0c4b3ff545d17844c59', 'bookmarked'],
-      );
-      const list = await listSources(engine);
-      expect(list.find(e => e.id === 'bookmarked')?.last_commit).toBe(
-        'e18392de0da4413ce33bd0c4b3ff545d17844c59',
-      );
-      expect(list.find(e => e.id === 'default')?.last_commit).toBeNull();
-    });
-  });
 });
 
 // ---------------------------------------------------------------------------

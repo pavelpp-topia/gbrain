@@ -114,12 +114,6 @@ export interface SourceListEntry {
   federated: boolean;
   page_count: number;
   last_sync_at: string | null;
-  /**
-   * Last fully-imported commit SHA (sync's completion bookmark). Lets batch
-   * callers (e.g. the repo-sync CronJob's skip-if-unchanged probe) compare
-   * remote heads against one list call instead of a `sources status` per id.
-   */
-  last_commit: string | null;
 }
 
 export interface SourceStatus {
@@ -566,11 +560,10 @@ export async function listSources(
     id: string;
     name: string;
     local_path: string | null;
-    last_commit: string | null;
     last_sync_at: Date | null;
     config: unknown;
   }>(
-    `SELECT id, name, local_path, last_commit, last_sync_at, config
+    `SELECT id, name, local_path, last_sync_at, config
        FROM sources ${archivedFilter} ORDER BY (id = 'default') DESC, id`,
   );
   const out: SourceListEntry[] = [];
@@ -584,7 +577,6 @@ export async function listSources(
       federated: cfg.federated === true,
       page_count: await countPages(engine, r.id),
       last_sync_at: r.last_sync_at ? new Date(r.last_sync_at).toISOString() : null,
-      last_commit: r.last_commit,
     });
   }
   return out;
