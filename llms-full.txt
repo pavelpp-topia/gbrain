@@ -187,7 +187,7 @@ mount, CEO-class with multiple team brains) and
 
 ## Architecture
 
-Contract-first: `src/core/operations.ts` defines ~90 shared operations (v0.29 adds `get_recent_salience`, `find_anomalies`, `get_recent_transcripts`; v0.42.43.0 adds `volunteer_context` — push-based context, see `docs/guides/push-context.md`). CLI and MCP
+Contract-first: `src/core/operations.ts` defines ~110 shared operations (v0.29 adds `get_recent_salience`, `find_anomalies`, `get_recent_transcripts`; v0.42.43.0 adds `volunteer_context` — push-based context, see `docs/guides/push-context.md`; v0.43.0.0 adds the five frozen MEMORY_VERBS — `recall`, `remember`, `entity`, `synthesize`, `forget` — servable alone via `gbrain serve --surface verbs`, see `docs/protocol/MEMORY_VERBS_v1.md`). CLI and MCP
 server are both generated from this single source. Engine factory (`src/core/engine-factory.ts`)
 dynamically imports the configured engine (`'pglite'` or `'postgres'`). Skills are fat
 markdown files (tool-agnostic, work with both CLI and plugin contexts).
@@ -216,6 +216,19 @@ Per-file detail is in `docs/architecture/KEY_FILES.md`.
   text, the cast parses it). Guarded by `scripts/check-jsonb-pattern.sh` (template grep) +
   `scripts/check-jsonb-params.mjs` (positional AST scanner); the real backstop is the DATABASE_URL-gated
   e2e parity tests, since PGLite can't surface the bug. Full rule in `docs/ENGINES.md`.
+- **Engine-live paths avoid runtime dynamic `import()` for helper dependencies.** In
+  `src/core/pglite-engine.ts`, `src/core/postgres-engine.ts`, and
+  `src/core/migrate.ts`, dependencies previously reached through runtime dynamic
+  imports use static top-level imports. The only current dynamic-`import()` exceptions
+  are the four `ai/gateway.ts` lookups in both engines'
+  `initSchema()` and `_upsertChunksOnce()` methods; each remains lazy inside a
+  local `try/catch` because the gateway has a large provider/config closure and,
+  more importantly, eager evaluation would occur before the catch and could
+  turn a recoverable default/config-row fallback into a module-load failure.
+  Every exception carries `engine-dynamic-import-ok` on the import line.
+  `scripts/check-engine-dynamic-import.sh` enforces the rule. For history, use
+  `git log -G'await[[:space:]]+import\\('`, not `git log -S`: a dynamic-to-static
+  rewrite can preserve the searched token while changing its context.
 - **Engine parity.** `src/core/postgres-engine.ts` and `src/core/pglite-engine.ts` move in
   lockstep — a new method/SQL shape lands in BOTH, pinned by `test/e2e/engine-parity.test.ts`.
   Forward-referenced columns/indexes go in the bootstrap probe set (guarded by
@@ -255,6 +268,7 @@ detail on demand.)
 | push-based context (volunteer/watch/reflex window) | `docs/guides/push-context.md` |
 | schema packs / page types / extraction | `docs/architecture/schema-packs.md`, `type-taxonomy.md`, `lens-packs.md` |
 | thin-client / remote MCP / cross-modal | `docs/architecture/thin-client.md` |
+| memory verbs / MCP tool surface (`--surface`) / conformance | `docs/protocol/MEMORY_VERBS_v1.md` + the `verbs*`/`surface.ts`/`protocol.ts` entries in `KEY_FILES.md` |
 | the CLI surface (commands + flags) | `gbrain --help` / `gbrain --tools-json`, plus the relevant `KEY_FILES.md` entry |
 | running or writing tests | `docs/TESTING.md` |
 | bulk-command progress wiring | `docs/progress-events.md` |
@@ -408,7 +422,7 @@ audit trail lives in the source repo's git history.
 
 ## Skills
 
-Read the skill files in `skills/` before doing brain operations. GBrain ships 30 skills
+Read the skill files in `skills/` before doing brain operations. GBrain ships 52 skills
 organized by `skills/RESOLVER.md` (`AGENTS.md` is also accepted as of v0.19):
 
 **Original 8 (conformance-migrated):** ingest (thin router), query, maintain, enrich,
@@ -1006,6 +1020,13 @@ If you fetched this file by URL without cloning yet, the companion files live at
 
 ## Step 1: Install GBrain
 
+> **NEVER install from the npm registry.** GBrain is not distributed on npm; the npm
+> package named `gbrain` is an unrelated package. Do NOT run `npm install -g gbrain` or
+> `bun add -g gbrain` (note the missing `github:` prefix — that's the trap). The only
+> supported sources are `github:garrytan/gbrain` and a git clone, exactly as shown below.
+> If an unrelated npm install is already present, remove it first
+> (`npm uninstall -g gbrain` / `bun remove -g gbrain`); `gbrain doctor` also detects this.
+
 Default path (Bun is required — gbrain is a Bun + TypeScript runtime):
 
 ```bash
@@ -1559,14 +1580,24 @@ This is the difference between a search engine and a brain. Search finds the pag
 
 ## Install
 
+> [!WARNING]
+> **GBrain is NOT distributed on npm.** The npm package named `gbrain` is an unrelated
+> package with no connection to this project. Do not run `npm install -g gbrain` or
+> `bun add -g gbrain` — you'll get something else, and it can shadow the real binary on
+> your PATH. Install and upgrade ONLY via the documented paths below
+> (`bun install -g github:garrytan/gbrain`, or `git clone` + `bun install && bun link`).
+> If you already ran the npm install by mistake: `npm uninstall -g gbrain` /
+> `bun remove -g gbrain`, then reinstall from GitHub. `gbrain doctor` detects a
+> shadowing npm install and prints the fix.
+
 GBrain is designed to be installed and operated by an AI agent. The fastest path is to have your agent do it for you. The CLI and MCP paths below are for people who want to wire it up themselves.
 
 ### Have your agent install it (recommended)
 
 If you don't already have an AI agent platform running, start with one of these. Both are designed to read GBrain's install protocol and execute it:
 
-- **[OpenClaw](https://github.com/openclawagents/openclaw)** — deploy [AlphaClaw on Render](https://render.com/deploy?repo=https://github.com/chrysb/alphaclaw) (one click, 8GB+ RAM)
-- **[Hermes](https://github.com/openclawagents/hermes)** — deploy on [Railway](https://github.com/praveen-ks-2001/hermes-agent-template) (one click)
+- **[OpenClaw](https://github.com/openclaw/openclaw)** — deploy [AlphaClaw on Render](https://render.com/deploy?repo=https://github.com/chrysb/alphaclaw) (one click, 8GB+ RAM)
+- **[Hermes](https://github.com/NousResearch/hermes-agent)** — deploy on [Railway](https://github.com/praveen-ks-2001/hermes-agent-template) (one click)
 
 Then paste this into your agent:
 
@@ -1575,7 +1606,7 @@ Retrieve and follow the instructions at:
 https://raw.githubusercontent.com/garrytan/gbrain/master/INSTALL_FOR_AGENTS.md
 ```
 
-The agent installs GBrain, creates the brain, asks for your API keys, loads 43 skills, configures the dream cycle, and verifies the install end-to-end. ~30 minutes. You answer questions, it does the work.
+The agent installs GBrain, creates the brain, asks for your API keys, loads 52 skills, configures the dream cycle, and verifies the install end-to-end. ~30 minutes. You answer questions, it does the work.
 
 > **Never set up an AI agent platform before?** The [personal-brain tutorial](docs/tutorials/personal-brain.md) walks the whole path end-to-end — picking OpenClaw vs Hermes, deploying it, pointing it at INSTALL_FOR_AGENTS.md, getting the API keys, and verifying the first query. Start there if any of the above is new.
 
@@ -1583,12 +1614,14 @@ The agent installs GBrain, creates the brain, asks for your API keys, loads 43 s
 
 Already running Claude Code or Codex? There are two ways to wire GBrain in, depending on what you want.
 
-**Just want a memory for your coding agent (recommended starting point).** Spin up a local brain and connect it in two commands — zero server, zero token, zero tunnel:
+**Just want a memory for your coding agent (recommended starting point).** Spin up a local brain and connect it in two commands — zero server, zero token, zero tunnel. `--surface verbs` gives your agent the five-verb memory protocol (`recall`, `remember`, `entity`, `synthesize`, `forget` — [MEMORY_VERBS v1](docs/protocol/MEMORY_VERBS_v1.md), frozen + additive-forever) instead of the full 110-tool wall; drop the flag for every operation:
 
 ```bash
-gbrain init --pglite                     # 2-second local brain (no Docker)
-claude mcp add gbrain -- gbrain serve    # or: codex mcp add gbrain -- gbrain serve
+gbrain init --pglite                                    # 2-second local brain (no Docker)
+claude mcp add gbrain -- gbrain serve --surface verbs   # or: codex mcp add gbrain -- gbrain serve --surface verbs
 ```
+
+If `claude` is not found, install Claude Code first — or use the per-harness blocks in the [protocol doc](docs/protocol/MEMORY_VERBS_v1.md). Heads-up: memories agents save default to brain-wide visibility (every connected agent can recall them); pass `visibility: "private"` for local-only facts.
 
 **Already have a brain on a remote host** (OpenClaw, Hermes, or any `gbrain serve --http`)? Point your laptop agents at it with one command each — `--install` wires it up and smoke-tests the token before handoff:
 
@@ -1601,7 +1634,7 @@ gbrain connect https://your-host/mcp --token gbrain_xxx --agent codex --install 
 
 ### Install the full autonomous setup into your existing agent
 
-Want the whole thing — local brain, 43 skills, the overnight dream cycle that enriches while you sleep? Paste this into Codex, Claude Code, Cursor, or another coding agent:
+Want the whole thing — local brain, 52 skills, the overnight dream cycle that enriches while you sleep? Paste this into Codex, Claude Code, Cursor, or another coding agent:
 
 ```
 Retrieve and follow the instructions at:
@@ -1624,7 +1657,7 @@ Postgres-at-scale, Supabase, and thin-client setup paths live in [`docs/INSTALL.
 
 ### Connect GBrain to your AI client (MCP)
 
-GBrain exposes 30+ tools over MCP (stdio and HTTP). The specific snippet depends on which client you use:
+GBrain exposes 110 tools over MCP (stdio and HTTP) — or exactly the five memory verbs with `--surface verbs`. The specific snippet depends on which client you use:
 
 - **[Claude Code](docs/mcp/CLAUDE_CODE.md)** — local: one command, `claude mcp add gbrain -- gbrain serve` (zero server, zero tunnel). Remote with just a bearer token: `gbrain connect https://your-host/mcp --token gbrain_xxx` prints a paste-ready block (or `--install` wires it up and smoke-tests the token).
 - **[Codex](docs/mcp/CODEX.md)** — `gbrain connect https://your-host/mcp --token gbrain_xxx --agent codex` (or `--install`). Codex reads the bearer from `$GBRAIN_REMOTE_TOKEN` at runtime, so the token never lands in Codex config.
@@ -1700,7 +1733,7 @@ Most personal-knowledge tools force one fixed layout: their idea of "notes" + "p
 **gbrain doesn't have a fixed layout.** It ships with bundled schema packs and lets you author your own when none fit:
 
 - **`gbrain-base-v2`** (default as of v0.41.22) — 15-type DRY/MECE canonical taxonomy (14 canonical + `note` catch-all): `person`, `company`, `media`, `tweet`, `social-digest`, `analysis`, `atom`, `concept`, `source`, `deal`, `email`, `slack`, `writing`, `project`, `note`. Subtypes/format/origin pushed to frontmatter. The taxonomy that responds to issue #1479.
-- **`gbrain-base`** (legacy, v0.41 and earlier brains) — the original 24-type layout. Stays bundled for back-compat; brains on it can upgrade via `gbrain onboard --check --explain` → `gbrain jobs submit unify-types --allow-protected --params '{"target_pack":"gbrain-base-v2"}'`.
+- **`gbrain-base`** (legacy, v0.41 and earlier brains) — the original 24-type layout. Stays bundled for back-compat; brains on it can upgrade via `gbrain onboard --check --explain` → `gbrain jobs submit unify-types --allow-protected --params '{"target_pack":"gbrain-base-v2","apply":true}'` (omit `"apply":true` for a dry-run preview — that is the default).
 - **`gbrain-recommended`** — extends `gbrain-base` with the 13 additional directories from `docs/GBRAIN_RECOMMENDED_SCHEMA.md` (source, place, trip, conversation, personal, civic, project, etc.). Activate with `gbrain schema use gbrain-recommended`.
 - **Your own pack** — `gbrain schema detect` clusters your actual filesystem into proposed types, `gbrain schema suggest` runs an LLM pass over them, and `gbrain schema review-candidates --apply` promotes the ones you like. Three commands and the brain knows your shape. Authoring a successor pack (declares `migration_from:` so existing brains can opt in): see [`docs/architecture/pack-upgrade-mechanism.md`](docs/architecture/pack-upgrade-mechanism.md).
 
@@ -1752,6 +1785,24 @@ The whole loop is described in [`docs/architecture/topologies.md`](docs/architec
 
 **Job queue (Minions).** BullMQ-shaped, Postgres-native job queue. Durable subagents (LLM tool loops that survive crashes via two-phase pending→done persistence), shell jobs with audit, child jobs with cascading timeouts, rate leases for outbound providers, attachments via S3/Supabase storage. Replaces "spawn subagent as fire-and-forget Promise" with something that recovers from anything.
 
+**Non-English brains (FTS language config).** The Postgres full-text search tokenizer is configurable via `GBRAIN_FTS_LANGUAGE`. Defaults to `english`. Set it to any text-search configuration that exists in your Postgres instance:
+
+```bash
+export GBRAIN_FTS_LANGUAGE=portuguese     # uses built-in portuguese stemmer
+export GBRAIN_FTS_LANGUAGE=spanish        # built-in spanish stemmer
+export GBRAIN_FTS_LANGUAGE=pt_br          # custom config (e.g. unaccent + portuguese)
+```
+
+List available configs: `psql -c "SELECT cfgname FROM pg_ts_config"`. Both the **query side** (`websearch_to_tsquery`) and the **write side** (the trigger functions that populate `pages.search_vector` and `content_chunks.search_vector`) honor `GBRAIN_FTS_LANGUAGE`. On first install (or upgrade), the `configurable_fts_language` schema migration reads the env var and creates trigger functions in the configured language; subsequent inserts/updates tokenize using that setting. To change language on a brain that has already run the migration, use the dedicated CLI command:
+
+```bash
+export GBRAIN_FTS_LANGUAGE=portuguese
+gbrain reindex-search-vector --dry-run    # preview row counts
+gbrain reindex-search-vector --yes        # recreate triggers + backfill
+```
+
+The command is idempotent (re-running with the same language is a no-op for vector content) and uses the same recreate-and-backfill primitives as the migration. For accent-insensitive Portuguese (`pt_br`), see [docs/guides/multi-language-fts.md](docs/guides/multi-language-fts.md) for the `unaccent` + portuguese stemmer recipe.
+
 **43 curated skills.** Routing lives in [`skills/RESOLVER.md`](skills/RESOLVER.md). Covers signal capture, ingest (idea / media / meeting), enrichment, querying, brain ops, citation fixing, daily task management, cron scheduling, reports, voice, soul audit, skill creation, eval framework, and migrations. Skills are markdown files (tool-agnostic), packaged as a single skillpack the installer drops into your agent workspace.
 
 **Eval framework.** `gbrain eval longmemeval` runs the public [LongMemEval](https://huggingface.co/datasets/xiaowu0162/longmemeval) benchmark against your hybrid retrieval. `gbrain eval export` + `gbrain eval replay` capture real queries and replay them against code changes (set `GBRAIN_CONTRIBUTOR_MODE=1`). `gbrain eval cross-modal` cross-checks an output against the task using three different-provider frontier models. `gbrain eval retrieval-quality` runs NamedThingBench, which hard-gates the named-thing retrieval families (title-substring, alias-synonym, generic-to-named, multi-chunk-dilution) so a regression in "find the page this query names" fails CI loudly. Full methodology in [`docs/eval/SEARCH_MODE_METHODOLOGY.md`](docs/eval/SEARCH_MODE_METHODOLOGY.md).
@@ -1782,6 +1833,8 @@ Data flowing into the brain. Each integration is a recipe — markdown + setup h
 **Why the graph matters.** Vector search returns chunks that are semantically close. The graph returns chunks that are factually connected. Hybrid search pulls from both; auto-linking on every write keeps the graph fresh. Deep dive: [`docs/architecture/RETRIEVAL.md`](docs/architecture/RETRIEVAL.md).
 
 ## Troubleshooting
+
+**PGLite crashes at startup with `RuntimeError: Aborted()` (often right after a macOS upgrade)?** Not a macOS incompatibility — the OS-upgrade reboot killed gbrain mid-write and tore the data dir's WAL. gbrain now repairs this automatically on the next command (data preserved, backup kept); if auto-repair is disabled or skipped, run `gbrain pglite-repair --dry-run` to diagnose and `gbrain pglite-repair --yes` to repair in place. Full recovery ladder (repair → rebuild → engine switch) in [`docs/ENGINES.md` — Troubleshooting: startup abort](docs/ENGINES.md#troubleshooting-startup-abort-runtimeerror-aborted) and [`docs/INSTALL.md`](docs/INSTALL.md#pglite-crashes-on-macos-26x-tahoe).
 
 **`gbrain import` fails with `expected N dimensions, not M`?** Run `gbrain doctor`. It will print the exact `gbrain config set ...` or `gbrain retrieval-upgrade` command to repair the mismatch. You should not need to delete `~/.gbrain`. Fresh `gbrain init --pglite` auto-detects your embedding provider from API keys in your environment: set `OPENAI_API_KEY` (or `ZEROENTROPY_API_KEY` / `VOYAGE_API_KEY`) before running init, or pass `--embedding-model <provider>:<model>` explicitly. With multiple keys set, init fires an interactive picker. In non-TTY contexts (CI, Docker) with no keys, init exits 1 with a paste-ready setup hint; pass `--no-embedding` to defer setup until runtime. See [`docs/integrations/embedding-providers.md`](docs/integrations/embedding-providers.md) for the full provider matrix and [`docs/operations/headless-install.md`](docs/operations/headless-install.md) for Docker/CI sequencing.
 
@@ -2093,6 +2146,51 @@ RRF fusion, multi-query expansion, and 4-layer dedup are engine-agnostic. They o
 
 **Why not self-hosted for v0:** The brain should be infrastructure agents use, not something you maintain. Self-hosted Postgres with Docker is a welcome community PR, but v0 optimizes for zero ops.
 
+### Opt-in RLS source-scope binding (`GBRAIN_RLS_SCOPE_BINDING`)
+
+Defense-in-depth layer for Postgres deployments that want the database itself
+to enforce source isolation, in addition to the mandatory app-layer filters
+(`sourceScopeOpts` — layer 1, always on).
+
+**Mechanism.** With `GBRAIN_RLS_SCOPE_BINDING=1` (or `true`), the engine's
+source-scoped read methods wrap their queries in a transaction that first runs
+`SELECT set_config('app.scopes', $1, true)` — the value is a bound parameter
+(federated `sourceIds` CSV > scalar `sourceId` > `'*'` for unscoped internal
+reads), transaction-local (equivalent to `SET LOCAL`, which itself can't take
+bound params). An RLS policy can then filter rows by
+`current_setting('app.scopes', true)`.
+
+**Default off.** With the env var unset, reads call through on the shared pool
+exactly as before — no per-read transaction, no pool-slot hold (the search
+methods keep the transaction they always had for their `SET LOCAL
+statement_timeout`). Existing operators see zero behavior change.
+
+**Enabling it** (operator-managed SQL; gbrain ships no DDL for this):
+
+```sql
+ALTER TABLE pages ENABLE ROW LEVEL SECURITY;
+CREATE POLICY pages_scope_filter ON pages
+  USING (current_setting('app.scopes', true) = '*'
+         OR source_id = ANY(string_to_array(current_setting('app.scopes', true), ',')));
+
+-- Required: connections that don't run through the scoped read helper
+-- (admin, autopilot, cycle, writes) must default to unscoped, or they
+-- see zero rows once the policy exists:
+ALTER ROLE <runtime-role> SET app.scopes = '*';
+
+-- If the runtime role OWNS the table, RLS is skipped for it unless forced:
+ALTER TABLE pages FORCE ROW LEVEL SECURITY;
+```
+
+Safe to enable in either order: the env var without a policy is a no-op
+setting; a policy without the env var is enforced only via the role default.
+
+**Honest caveat:** only read paths routed through the scoped helper carry a
+per-request scope binding — unwrapped paths (writes, admin/maintenance reads)
+run under the role default and are not backstopped per caller. This is layer 2;
+the app-layer source filters remain layer 1 and stay mandatory. Behavioral pins
+live in `test/postgres-engine-rls-scope.test.ts`.
+
 ## PGLiteEngine (v0.7, ships)
 
 **Dependencies:** `@electric-sql/pglite` (v0.4.4+)
@@ -2120,6 +2218,66 @@ RRF fusion, multi-query expansion, and 4-layer dedup are engine-agnostic. They o
 | Backups | Manual (file copy) | Managed by Supabase |
 
 **Migration:** `gbrain migrate --to supabase` exports everything (pages, chunks, embeddings, links, tags, timeline) and imports into Supabase. `gbrain migrate --to pglite` goes the other direction. Bidirectional, lossless.
+
+### Troubleshooting: startup abort (`RuntimeError: Aborted()`)
+
+**Symptom:** every PGLite-touching command dies at startup with
+`PGLite failed to initialize its WASM runtime … Aborted(). Build with
+-sASSERTIONS for more info.` — commonly first seen right after a macOS
+upgrade.
+
+**Real root cause:** corrupt WAL/checkpoint state in the data dir after an
+unclean shutdown (the OS-upgrade reboot kills gbrain mid-write and tears the
+write-ahead log; every subsequent open fails WAL replay inside WASM and
+Emscripten surfaces only the opaque abort). It is **not** a macOS/WASM
+incompatibility — the same signature reproduces across macOS versions and on
+Linux, and rebuilding the data dir on the same OS fixes it. No pglite or Bun
+version bump changes it.
+
+**Recovery ladder** (top rung first):
+
+1. **Auto-repair (default).** `PGLiteEngine.connect()` detects the abort,
+   backs up `pg_wal/` + `pg_control` into a sibling
+   `<dataDir>.wal-repair-backup-<ts>/` dir, resets the WAL in place
+   (pg_resetwal semantics — data files preserved; transactions not
+   checkpointed before the corruption may be lost), and retries once. On
+   success it prints a loud stderr notice naming the backup and recommending
+   `gbrain doctor`. Safety bounds: repair only runs under a cleanly-acquired
+   data-dir lock (never after reaping another process's lock), skips for a
+   cooldown window after a failed attempt
+   (`GBRAIN_PGLITE_WAL_REPAIR_COOLDOWN_SECONDS`, default 3600), reuses one
+   backup per corruption episode (newest 3 episodes retained), and restores
+   the original files if the retry still fails. Kill-switch:
+   `GBRAIN_PGLITE_WAL_REPAIR=off`.
+2. **Manual repair.** `gbrain pglite-repair --dry-run` diagnoses the data dir
+   (read-only); `gbrain pglite-repair --yes` runs the same in-place WAL reset
+   deliberately. Refuses when another gbrain process holds the brain (a live
+   `gbrain serve` is named explicitly) and never force-removes `.gbrain-lock`.
+3. **Rebuild.** `gbrain reinit-pglite` (embedding model/dimensions default
+   from your config) wipes and re-creates the brain from your brain repo, or
+   manually: back up `~/.gbrain`, move `brain.pglite` aside,
+   `gbrain init --pglite`, re-add sources, `gbrain sync`, `gbrain embed`.
+   Required for *catalog* corruption (58P01 / pgvector load failure) — WAL
+   repair cannot fix that class.
+4. **Switch engines.** `gbrain init --supabase`, or native Postgres +
+   pgvector (recipe below, contributed by @roysaurav):
+
+   ```bash
+   brew install postgresql@17
+   brew services start postgresql@17
+   createdb gbrain
+   cd /tmp && git clone --branch v0.8.0 https://github.com/pgvector/pgvector.git
+   cd pgvector && make && make install
+   psql gbrain -c "CREATE EXTENSION IF NOT EXISTS vector;"
+   # ~/.gbrain/config.json: { "engine": "postgres",
+   #   "database_url": "postgresql://localhost:5432/gbrain" }
+   gbrain apply-migrations --yes && gbrain doctor
+   ```
+
+`gbrain doctor` runs a `pglite_data_dir` check whenever a PGLite brain fails
+to connect: it diagnoses the dir from disk, names the repair command, reports
+retained repair backups, and escalates when repairs keep recurring (that
+means the unclean-shutdown genesis is still active — see the ladder's rung 4).
 
 ## JSONB writes: never double-encode (the #2339 trap)
 
@@ -2251,7 +2409,7 @@ gbrain schema sync --apply
 The sync backfills `page.type = 'meeting'` on all 4000 pages in 1000-row batches. Now:
 
 - `gbrain whoknows "Q3 roadmap discussion"` routes through the meeting type, ranking by `expert_routing` signal (attendees, recency, salience) instead of raw text.
-- `gbrain extract-facts` runs on every meeting page automatically (because `extractable: true`), pulling typed facts like `attended_by=alice-example`, `date=2026-05-23`.
+- The `extract_facts` cycle runs on every meeting page automatically (because `extractable: true`), pulling typed facts like `attended_by=alice-example`, `date=2026-05-23`.
 - The downstream `think` skill can now answer "what did we decide about pricing in the last three roadmap meetings" by querying the meeting graph instead of grep'ing 4000 files.
 
 One command. 4000 pages went from invisible to queryable. The content didn't change. The structure did.
@@ -2281,7 +2439,7 @@ gbrain schema add-link-type led-by      --page-type deal     --target-type inves
 gbrain schema sync --apply
 ```
 
-Now `gbrain whoknows "Series A SaaS"` routes through `investor` and `portco` types specifically, not the noisy general type set. `gbrain graph-query alice-example --type intro-from --depth 2` walks two hops of intros to surface "Alice introduced you to Bob who introduced you to Charlie." `gbrain extract-facts` starts producing typed claims from the fence in your deal pages: `(deals/acme-seed, raise=2000000, valuation=15000000, lead=widget-vc, closed_at=2026-05-23)`.
+Now `gbrain whoknows "Series A SaaS"` routes through `investor` and `portco` types specifically, not the noisy general type set. `gbrain graph-query alice-example --type intro-from --depth 2` walks two hops of intros to surface "Alice introduced you to Bob who introduced you to Charlie." The `extract_facts` cycle starts producing typed claims from the fence in your deal pages: `(deals/acme-seed, raise=2000000, valuation=15000000, lead=widget-vc, closed_at=2026-05-23)`.
 
 The CRM you've been promising yourself you'll set up next quarter? You just shipped it in 4 commands. It's downstream of your notes, not parallel to them.
 
@@ -2362,7 +2520,7 @@ Re-run the same `whoknows` query. Top-3 should shift, because the new type is no
 
 Three things gbrain does that generic note systems can't:
 
-**1. The brain knows the difference between a person and an idea.** Page-type matters at query time. `gbrain whoknows` only considers `expert_routing: true` types. `gbrain extract-facts` only runs on `extractable: true` types. `gbrain graph-query` walks declared link verbs. None of that works on a flat tag system because tags don't have semantics — they're labels. Types are first-class citizens with rules attached.
+**1. The brain knows the difference between a person and an idea.** Page-type matters at query time. `gbrain whoknows` only considers `expert_routing: true` types. The `extract_facts` cycle only runs on `extractable: true` types. `gbrain graph-query` walks declared link verbs. None of that works on a flat tag system because tags don't have semantics — they're labels. Types are first-class citizens with rules attached.
 
 **2. Untyped content is invisible content.** If your meetings are typed as `note`, expert routing skips them, facts extraction ignores them, link inference doesn't fire. They exist on disk and they're indexed for text search, but the structural surfaces (whoknows, find_experts, recall, think) treat them as second-class. Adding a type isn't cosmetic; it's structural promotion.
 
@@ -2655,14 +2813,17 @@ GBrain is tuned for the Supabase **Transaction pooler** (port 6543): it
 auto-disables prepared statements there and routes `engine.transaction()`
 (migrations, DDL, sync imports) to a derived **direct** connection
 (`db.<ref>.supabase.co:5432`). That direct host is IPv6-only, so on an
-IPv4-only host, reads work but sync **silently skips most pages**. This is the
-number one cause of "sync ran but nothing happened."
+IPv4-only host it is unreachable. When that happens gbrain now falls back to
+the pooler automatically (one stderr warning, then single-pool mode for the
+rest of the process) — but the pooler's ~2-min statement timeout can truncate
+very long migrations or bulk imports.
 
 Fix: make the direct connection reachable over IPv4. Either set
 `GBRAIN_DIRECT_DATABASE_URL` to the **Session pooler** string (port 5432 on the
-`pooler.supabase.com` host, IPv4), or enable Supabase's IPv4 add-on. Verify by
-running `gbrain sync` and checking that the page count in `gbrain stats` matches
-the syncable file count in the repo.
+`pooler.supabase.com` host, IPv4), or enable Supabase's IPv4 add-on.
+`GBRAIN_DISABLE_DIRECT_POOL=1` skips the direct pool (and the fallback warning)
+entirely. Verify by running `gbrain sync` and checking that the page count in
+`gbrain stats` matches the syncable file count in the repo.
 
 ### The Primitives
 
@@ -2764,6 +2925,16 @@ hashes match. If both a cron and `--watch` fire simultaneously, no conflict.
    or delete them, and fixing the file clears it on the next sync. A repository
    history rewrite still hard-blocks even with `--skip-failed`. Run
    `gbrain sync --skip-failed` to acknowledge a known-bad set yourself.
+
+5. **Import checkpoints name the import target, not the caller's CWD.**
+   Interrupted `gbrain import <dir>` runs may leave
+   `~/.gbrain/import-checkpoint.json` so the next import can resume. The
+   checkpoint `dir` is the absolute, resolved import target captured when
+   import starts. It is not a cleanup instruction and it must not be
+   re-derived from the process working directory. Checkpoints written by
+   gbrain include `schema_version: 1`, `owner: "gbrain"`, and
+   `kind: "import"` so downstream tools can validate the contract before
+   deciding whether to resume.
 
 ## How to Verify
 
@@ -3574,8 +3745,8 @@ Source: https://raw.githubusercontent.com/garrytan/gbrain/master/docs/mcp/DEPLOY
 > dashboard at `/admin`, scoped operations, and a live SSE activity feed.
 > Pre-v0.26 legacy bearer tokens still work — `verifyAccessToken` falls back
 > to the `access_tokens` table and grandfathers tokens to `read+write+admin`.
-> Postgres-only for the legacy fallback (the `access_tokens` table is Postgres-only);
-> OAuth tables work on both PGLite and Postgres. See [SECURITY.md](../../SECURITY.md)
+> Both the legacy fallback and the OAuth tables work on PGLite and Postgres
+> (both engine schemas carry `access_tokens`). See [SECURITY.md](../../SECURITY.md)
 > for env vars and tunable defaults.
 
 Access your brain from any device, any AI client. GBrain ships two transports:
@@ -3587,11 +3758,16 @@ for remote clients over OAuth 2.1.
 ### Local stdio (zero setup)
 
 ```bash
-gbrain serve
+gbrain serve                  # full operation catalog (default)
+gbrain serve --surface verbs  # just the 5 memory verbs (quickstart surface)
 ```
 
 Works with Claude Code, Cursor, Windsurf, and any MCP client that supports stdio.
 No server, no tunnel, no token needed. Works on both PGLite and Postgres engines.
+`--surface verbs` exposes exactly the five-verb memory protocol (`recall`,
+`remember`, `entity`, `synthesize`, `forget` —
+[MEMORY_VERBS v1](../protocol/MEMORY_VERBS_v1.md)) instead of the full catalog;
+omit the flag (default `full`) for every operation.
 
 ### Remote over OAuth 2.1 (recommended, v0.26.0+)
 
@@ -3643,12 +3819,19 @@ to the HTTP server, so no migration is required.
 gbrain serve --http --port 3131
 ```
 
-On first start, the server prints an **admin bootstrap token** to stderr:
+On first start in an interactive terminal, the server prints an **admin
+bootstrap token** to stderr:
 
 ```
 Admin bootstrap token: 3a1f9c...
 Open http://localhost:3131/admin and paste it to log in.
 ```
+
+On a non-TTY start (systemd, Docker, any piped or captured logs) the generated
+token is hidden so it never lands in log storage. For headless deploys either
+set `GBRAIN_ADMIN_BOOTSTRAP_TOKEN` to a value you control before starting, or
+run `gbrain serve --http --print-admin-token` once on a trusted terminal to
+force printing.
 
 Save this token. Open `http://localhost:3131/admin` and paste it to access the
 dashboard. The dashboard shows live activity, registered clients, request logs,
@@ -3812,13 +3995,50 @@ All 30 GBrain operations are available remotely, including `sync_brain` and
 directory where `gbrain serve` was launched. Symlinks, `..` traversal, and absolute
 paths outside cwd are rejected. Page slugs and filenames are allowlist-validated
 (alphanumeric + hyphens; no control chars, RTL overrides, or backslashes). Local
-CLI callers (`gbrain file upload ...`) keep unrestricted filesystem access since
+CLI callers (`gbrain files upload ...`) keep unrestricted filesystem access since
 the user owns the machine.
 
 ## Deployment Options
 
 See [ALTERNATIVES.md](ALTERNATIVES.md) for a comparison of ngrok, Tailscale
 Funnel, and cloud hosts (Fly.io, Railway).
+
+### Co-located Docker workloads (self-hosted Postgres)
+
+OAuth scopes and source scoping guard the `gbrain serve --http` path. They do
+NOT guard raw Postgres. If the brain's Postgres runs as a container on the same
+Docker host as other workloads (agent runtimes, n8n, staging fixtures), any
+container sharing Docker's default `bridge` network can open a direct DB
+session — no OAuth token required — and read every source. That silently
+recreates a privileged path underneath the isolation you configured at the MCP
+layer.
+
+Network-zone the host so untrusted containers can never reach Postgres:
+
+```
+Docker host
+├── gbrain-net          ← ONLY the brain's Postgres (+ gbrain serve, if containerized)
+├── agent-<id>-net      ← each untrusted agent runtime, isolated
+└── default bridge      ← no secret-bearing databases
+```
+
+Operator checklist:
+
+```text
+[ ] Postgres is on a user-defined Docker network, not the default bridge
+    (or nothing else runs on that bridge)
+[ ] If Postgres publishes a host port at all, it binds loopback only
+    (`-p 127.0.0.1:5432:5432`, never `0.0.0.0`)
+[ ] Untrusted agent containers have no DATABASE_URL or Postgres password
+[ ] Untrusted agents reach the brain via OAuth/Bearer against serve --http only
+    (host loopback via host.docker.internal / host gateway — never gbrain-net)
+[ ] OAuth clients are least-privilege: scoped --source / --federated-read,
+    pre-minted short-lived tokens preferred over long-lived client secrets
+[ ] Isolation verified: a team-scoped client cannot read internal-only sources
+```
+
+Optional defense-in-depth: a dedicated Postgres role (or RLS) limited to the
+allowed `source_id`s, so even a leaked connection string can't read everything.
 
 ## Troubleshooting
 
@@ -3851,6 +4071,273 @@ dashboard baked into the binary. The custom HTTP wrapper pattern (see
 [voice recipe](../../recipes/twilio-voice-brain.md)) is still supported for
 teams that need bespoke middleware, but for most remote deployments the
 built-in server is the recommended path.
+
+---
+
+## docs/protocol/MEMORY_VERBS_v1.md
+
+Source: https://raw.githubusercontent.com/garrytan/gbrain/master/docs/protocol/MEMORY_VERBS_v1.md
+
+# MEMORY_VERBS v1 — the memory wire protocol
+
+GBrain's frozen five-verb memory interface over MCP: `recall`, `remember`,
+`entity`, `synthesize`, `forget`. The contract every harness can rely on the
+way every Postgres client relies on the wire protocol — and the contract any
+OTHER memory server can implement and certify against
+(`gbrain protocol conformance --target <endpoint>`).
+
+```
+agent (any MCP harness)
+   │  remember("picked Stripe over Adyen", provenance: "chat 2026-06-11")
+   ▼
+five verbs ── recall ── remember ── entity ── synthesize ── forget
+   │   self-describing envelopes: protocol_version, evidence, provenance,
+   │   budget meta, cost block, enumerated error codes + a populated fix
+   ▼
+your brain (reference implementation: gbrain; any conformant server)
+```
+
+**Machine-readable spec:** `gbrain protocol --json` emits the input schemas
+from the live operation definitions plus the response-shape registry — doc and
+code structurally cannot drift; conformance validates live responses against
+the same registry.
+
+## Versioning policy (the point of the freeze)
+
+- Every field NAME and its SEMANTICS in v1 are frozen forever — never removed,
+  renamed, or re-typed; meanings never change.
+- New OPTIONAL params and new OPTIONAL response fields may be added at any
+  time (additive-forever). A conformant CLIENT must ignore unknown fields; a
+  conformant SERVER must never reject unknown-to-v1 additions it itself ships.
+- `protocol_version` (integer, starts at `1`) rides every verb response and
+  every verb error. It increments ONLY on a breaking change, which by policy
+  requires a new `MEMORY_VERBS_v2` document — expected never.
+- Conformance pins a minimum version; certification asserts shape, enum
+  validity, contract behavior, and round-trips — never ranking quality (that
+  is BrainBench's job).
+- Enum values are part of the contract. Where an enum's DERIVATION is
+  implementation-defined (noted per field), implementations may improve the
+  derivation without a version bump; the values and their meanings stay fixed.
+
+## Install (the 4-command quickstart)
+
+```bash
+gbrain init --pglite                                      # 2-second local brain
+claude mcp add gbrain -- gbrain serve --surface verbs     # the five-verb surface
+gbrain remember "I prefer dark mode in every editor" --provenance demo --entity people/me
+gbrain recall --entity people/me                          # …now ask your agent in a NEW session
+```
+
+> Memories agents save are readable by every agent connected to this brain;
+> pass `visibility: "private"` for local-CLI-only facts.
+
+If `claude` is not found: install Claude Code first, or use a block below.
+
+**Codex**
+```bash
+codex mcp add gbrain -- gbrain serve --surface verbs
+```
+
+**OpenClaw / any stdio MCP host** — register the server command
+`gbrain serve --surface verbs`. Remote brains: `gbrain serve --http` on the
+host, then `gbrain connect https://host/mcp --token gbrain_xxx --install` on
+each client.
+
+**Surface modes:** `--surface verbs` exposes EXACTLY the five verbs —
+advertised list AND dispatch are filtered fail-closed (a hidden op returns
+`unknown_tool` even when called by name). `--surface full` (the default)
+exposes every operation, verbs included. Why default full: verbs is for
+agents and quickstarts; full preserves existing advanced tooling. Persist a
+default with `gbrain config set mcp_surface verbs`.
+
+## The verbs
+
+### recall(query?, entity?, budget_tokens?, since?, session_id?, limit?, …) — read
+
+Retrieve saved facts and (with `query`) budget-packed page snippets.
+
+- `entity` scopes the FACTS arm; `query` runs the hybrid-search arm over
+  pages; both present ⇒ both arms run.
+- `since`: ISO 8601 date/datetime — filters the FACTS arm only in v1. (The
+  reference implementation also accepts relative phrases like `"8 hours ago"`
+  as a convenience; only ISO 8601 is part of the frozen contract.)
+- `limit` is a PER-ARM cap (facts and search results each).
+- `budget_tokens`: SERVER-side packing — facts pack first (limit-capped
+  one-liners, so search-arm starvation is bounded), search results take the
+  remainder. The estimator is char/4 (±10–15%); `budget_used` reports packed
+  tokens, `dropped_count` what didn't fit. Never advisory, never client-side.
+- No embedding provider configured? The search arm degrades to keyword-only
+  and the response notes `search_degraded` — never an error.
+
+Response — an additive SUPERSET of the pre-v1 facts envelope on EVERY call
+(all legacy fields unchanged; JSON consumers ignore additions):
+
+| field | type | semantics |
+|---|---|---|
+| `protocol_version` | int | always present (every verb, every call) |
+| `facts[]` | array | legacy fact fields unchanged, PLUS per fact: `fact_id` (opaque STRING — the value `forget` accepts; the legacy numeric `id` stays for pre-v1 consumers) and `provenance` (the stored source attribution) |
+| `total` | int | count of facts returned |
+| `results[]` | array | search arm only: `slug`, `title`, `chunk`, `evidence`, `create_safety`, `provenance` (origin page slug) |
+| `search_degraded` | string? | present when keyword-only fallback fired |
+| `budget_tokens` / `budget_used` / `dropped_count` | int? | present when `budget_tokens` was passed |
+
+**evidence** (enum, zero-LLM heuristic): `alias_hit` \| `exact_title_match` \|
+`high_vector_match` \| `keyword_exact` \| `weak_semantic` — why each result
+matched. **create_safety** (enum): `exists` (a page for this already exists)
+\| `probable` (likely exists; check before creating) \| `unknown` (no
+signal). The derivation of both is implementation-defined and may improve;
+the values are frozen.
+
+### remember(fact, provenance, ttl?, entity?, kind?, visibility?) — write
+
+Save ONE fact with mandatory attribution.
+
+- `provenance` (REQUIRED, free text ≤500 chars, stored verbatim): e.g.
+  `"conversation 2026-06-12"`, `"user said in chat"`, `"import: notes.md"`.
+  Empty ⇒ `provenance_required` error with a fix.
+- `entity`: set whenever the fact is about a specific person/company/project —
+  entity-scoped recall will not find unattributed facts.
+- `ttl`: duration shorthand (`"30d"`, `"12h"`, `"45m"`) or an absolute ISO 8601
+  timestamp. ISO-8601 DURATIONS (`P30D`) are rejected with a self-correcting
+  suggestion. Omitted ⇒ never expires.
+- `kind`: `event` \| `preference` \| `commitment` \| `belief` \| `fact`
+  (default).
+- `visibility`: `world` (DEFAULT — readable by every agent connected to this
+  brain; required for the remote remember→recall round-trip) \| `private`
+  (local CLI reads only). The init quickstart carries the consent line.
+
+Response: `{ id, status, status_text, entity_slug, valid_until,
+protocol_version }` (+ `degraded_dedup: true` when no embedding provider —
+near-duplicates may insert; dedup and supersession ride embedding similarity).
+
+- `id` — opaque STRING (gbrain serializes integers; another implementation may
+  use UUIDs). On `status: "duplicate"` it is the EXISTING fact's id.
+- `status` — `inserted` \| `duplicate` \| `superseded`. **Branch on `status`,
+  never on `status_text`** (the human rendering). Supersession is
+  implementation-defined; the reference rule: same entity + same kind +
+  similarity above the dedup threshold + different text = the new fact
+  supersedes the old ("X at acme-example" → "X left acme-example").
+- Omitted optional inputs echo as `null`, never absent.
+
+### entity(name) — read, zero LLM, p99 < 100ms
+
+One known person/company/project card. NEVER errors on a miss.
+
+Resolution (frozen precedence): alias > exact title > slug/slug-suffix; ties
+break on most-recently-touched. Multi-hit ⇒ best match's card + runners-up in
+`suggestions`. Miss ⇒ `found: false` + keyword near-misses with
+`create_safety` hints.
+
+Response: `{ protocol_version, found, latency_ms, card?, suggestions? }`.
+Card: `{ entity{slug,title,type}, aka[], summary, last_touched{updated_at,
+last_retrieved_at, last_timeline_date}, open_threads[], edges[],
+backlink_count, active_fact_count }`.
+
+- `summary` passes the same privacy fences as `get_page` (takes + private
+  facts stripped); remote callers never see private facts in the card.
+- `open_threads` (best-effort in v1): active commitment-kind facts + timeline
+  entries from the last 90 days, capped at 3.
+- `edges`: top ~10 typed edges, mentions excluded, out-edges first.
+- The p99 < 100ms promise is op-layer latency (transport excluded), CI-gated
+  on a 20K-page corpus. 200K validation recipe below.
+
+### synthesize(question, since?, until?) — read, EXPENSIVE
+
+`[EXPENSIVE / SLOW — makes LLM calls, seconds-to-minutes latency, costs
+money]` — the deliberately-priced slow verb. Prefer `recall`/`entity` for
+lookups; use synthesize only when the answer requires combining evidence
+across pages.
+
+Response: `{ answer, sources[], gaps[], cost{model, input_tokens,
+output_tokens, usd_estimate}, protocol_version }`.
+
+- The `cost` block is a BEST-EFFORT AGGREGATE (retries/multi-call flows sum;
+  cache hits may undercount; token fields are `null` when a provider returns
+  no accounting). Honest signal, not an invoice.
+- No LLM configured ⇒ the protocol error `unavailable` with a fix — never a
+  fake answer.
+
+### forget(id, reason?) — write
+
+Expire a fact by its opaque string id (from `remember` or
+`recall.facts[].fact_id` — never a page slug). Idempotent: re-forgetting an
+already-expired fact returns `expired: false` (success); unknown id ⇒
+`not_found`. Facts are expired with an audit trail, never deleted.
+
+Response: `{ id, expired, reason, protocol_version }`.
+
+## Error contract (uniform across all five verbs)
+
+```json
+{ "error": "<code>", "message": "...", "suggestion": "problem + cause + fix",
+  "detail": "freeform specifics", "protocol_version": 1 }
+```
+
+Codes (coarse on purpose — codes are for branching; `detail` carries the
+story): `invalid_params`, `provenance_required`, `not_found`, `scope_denied`,
+`unavailable` (a required dependency cannot serve: no API key, gateway down,
+model refusal — configure/retry, not a server bug), `budget_unsatisfiable`
+(RESERVED — schema-listed, never returned in v1), `internal`.
+
+Every verb error carries a POPULATED `suggestion`. Specific cases: `recall` on
+an empty brain returns empty arrays (success, not an error); auth/scope
+failures fail closed via the standard dispatch.
+
+## Trust boundary
+
+Verbs are ordinary operations: they inherit fail-closed `remote` semantics,
+OAuth scope enforcement (`remember`/`forget` are write-scope), and per-source
+isolation on every read. Remote callers see `visibility = world` facts only.
+
+## Conformance + certification
+
+```bash
+gbrain protocol conformance                                  # self-certify (stdio)
+gbrain protocol conformance --target http://localhost:3131/mcp --token gbrain_xxx
+gbrain protocol conformance --target "bun run src/cli.ts serve"
+gbrain protocol conformance --synthesize                     # also live-call synthesize
+```
+
+Pass criteria: response SHAPE (required fields, enum validity), CONTRACT
+BEHAVIOR (provenance rejected when empty; budget arithmetic consistent;
+entity miss ⇒ `found:false`, not an error; private facts absent from remote
+cards; idempotent forget), and ROUND-TRIP (remember → recall by entity — a
+plain indexed read, deterministic). It does NOT judge ranking quality.
+Entity-card cases need a seedable page (`put_page`); against verbs-only
+targets they skip honestly. `--synthesize` is cost-gated: with no LLM key it
+asserts the clean `unavailable` error (what CI does); with a key it spends
+real tokens.
+
+Conformance is a LIVE test that WRITES: it seeds a marker-suffixed synthetic
+entity page (`people/conformance-<marker>`, when the target exposes
+`put_page`) and writes/expires facts through `remember`/`forget`. Point it at
+write-capable credentials and a brain you're comfortable leaving those
+synthetic artifacts in — they're marker-named for easy cleanup, not
+auto-deleted. The fixture set ships as data
+(`test/fixtures/memory-verbs/cases.json`) and seeds BrainBench's
+protocol-compliance arm. gbrain's CI certifies its own stdio + HTTP
+transports; external certification is best-effort tooling until a second
+implementation exists.
+
+## Observability (local only)
+
+Every verb call appends one line to
+`~/.gbrain/integrations/memory-verbs/usage.jsonl` — **local JSONL only, never
+uploaded**, stats-only (lock-free rotation may drop lines; POSIX O_APPEND
+line-atomic, best-effort on Windows). `gbrain protocol stats [--days N]`
+aggregates per-verb calls, error rate, latency, budget drops, entity hit rate,
+and the measured TTHW (install → first verb call, from the
+`protocol_installed_at` stamp). `gbrain doctor` carries a
+`memory_verbs_usage` health line.
+
+## 200K-page latency validation (manual recipe)
+
+CI gates entity() p99 < 100ms on a 20K-page corpus
+(`test/entity-card-perf.slow.test.ts`). To validate at 200K, edit the
+constants at the top of that file (`PAGES = 200_000`, `LINKS = 1_000_000`,
+`ALIASES = 300_000`, `FACTS = 400_000`) and run
+`bun test test/entity-card-perf.slow.test.ts --timeout=1800000` — seeding
+dominates (~minutes); the measured calls report p50/p99 + the ratio guard.
 
 ---
 

@@ -9,7 +9,7 @@ Already running [OpenClaw](https://github.com/garrytan/openclaw) or [Hermes](htt
 ```bash
 bun install -g github:garrytan/gbrain
 gbrain init --pglite                  # 2 seconds; no server
-gbrain skillpack scaffold --all       # 43 skills scaffolded into your agent workspace
+gbrain skillpack scaffold --all       # 52 skills scaffolded into your agent workspace
 gbrain doctor                         # green checks all the way down
 ```
 
@@ -39,10 +39,11 @@ gbrain migrate --to pglite       # Postgres → PGLite (rare)
 
 For shared / large / multi-machine deployments (a team or company brain with multiple users hitting one server over HTTP MCP with OAuth scoping per user), follow the dedicated walkthrough: **[Tutorial: set up GBrain as your company brain](tutorials/company-brain.md)**.
 
-API keys live in `~/.gbrain/config.json` (file plane) or env vars (`OPENAI_API_KEY`, `ZEROENTROPY_API_KEY`, `VOYAGE_API_KEY`, `ANTHROPIC_API_KEY`). Set via CLI:
+API keys live in `~/.gbrain/config.json` (file plane) or env vars (`OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `ZEROENTROPY_API_KEY`, `VOYAGE_API_KEY`, `ANTHROPIC_API_KEY`). Set via CLI:
 
 ```bash
 gbrain config set zeroentropy_api_key sk-...
+gbrain config set openrouter_api_key sk-or-...
 gbrain config set anthropic_api_key sk-ant-...
 ```
 
@@ -57,16 +58,17 @@ gbrain autopilot --install        # background daemon for nightly enrichment
 **Wire this same local brain into your coding agent** — zero server, zero token:
 
 ```bash
-claude mcp add gbrain -- gbrain serve    # Claude Code
-codex  mcp add gbrain -- gbrain serve    # Codex
+claude mcp add gbrain -- gbrain serve --surface verbs    # Claude Code
+codex  mcp add gbrain -- gbrain serve --surface verbs    # Codex
 ```
 
-The agent spawns `gbrain serve` as a stdio subprocess against your local brain. Full walkthrough (both this local path and connecting to a remote brain), plus the brain-first protocol to paste into `CLAUDE.md` / `AGENTS.md`: **[Give your coding agent a memory](tutorials/connect-coding-agent.md)**.
+The agent spawns `gbrain serve` as a stdio subprocess against your local brain. `--surface verbs` gives the agent the five-verb memory protocol (`recall`, `remember`, `entity`, `synthesize`, `forget` — [MEMORY_VERBS v1](protocol/MEMORY_VERBS_v1.md)) instead of the full tool catalog; drop the flag (default `full`) for every operation. Full walkthrough (both this local path and connecting to a remote brain), plus the brain-first protocol to paste into `CLAUDE.md` / `AGENTS.md`: **[Give your coding agent a memory](tutorials/connect-coding-agent.md)**.
 
 ## 3. MCP server (any MCP client)
 
 ```bash
 gbrain serve                      # stdio MCP (Claude Desktop / Code / Cursor)
+gbrain serve --surface verbs      # stdio MCP, just the 5 memory verbs (quickstart)
 gbrain serve --http               # HTTP MCP with OAuth 2.1 + admin dashboard
 ```
 
@@ -111,3 +113,49 @@ gbrain models doctor              # 1-token probe per configured model
 ```
 
 If anything's yellow, `gbrain doctor` names the fix command in the message. Most issues are missing API keys or stale schema (`gbrain upgrade --force-schema`).
+
+## Troubleshooting
+
+### PGLite crashes on macOS 26.x (Tahoe)
+
+This crash (`RuntimeError: Aborted()` at engine startup, typically first seen
+after a macOS upgrade) is **not** a macOS/WASM incompatibility. The upgrade
+reboot kills gbrain mid-write and tears the data dir's write-ahead log; every
+subsequent open then fails WAL replay. Recovery ladder:
+
+1. **Auto-repair (default):** just run any gbrain command — gbrain detects the
+   abort, resets the WAL in place (data preserved; a backup of the pre-repair
+   state is kept next to the data dir), and continues. Then run `gbrain doctor`.
+2. **Manual repair:** `gbrain pglite-repair --dry-run` to diagnose,
+   `gbrain pglite-repair --yes` to repair in place.
+3. **Rebuild:** `gbrain reinit-pglite` (wipes and re-creates the brain from
+   your brain repo; embedding settings default from your config).
+4. **Switch engines** — if you prefer a server database anyway, native
+   Homebrew PostgreSQL works great and supports multiple concurrent agents:
+
+```bash
+# Install PostgreSQL + pgvector
+brew install postgresql@17
+brew services start postgresql@17
+createdb gbrain
+
+# Build pgvector from source (required for vector search)
+cd /tmp && git clone --branch v0.8.0 https://github.com/pgvector/pgvector.git
+cd pgvector && make && make install
+psql gbrain -c "CREATE EXTENSION IF NOT EXISTS vector;"
+
+# Point gbrain at your local Postgres
+cat > ~/.gbrain/config.json << 'EOF'
+{
+  "engine": "postgres",
+  "database_url": "postgresql://localhost:5432/gbrain",
+  "schema_pack": "gbrain-base-v2"
+}
+EOF
+
+# Run migrations and verify
+gbrain apply-migrations --yes
+gbrain doctor
+```
+
+Once `gbrain doctor` shows green, the brain works identically to PGLite — same commands, same skills, same data model. The only difference is the storage backend (plus multi-connection support: several agents can share one Postgres brain, which PGLite's single-process lock doesn't allow).

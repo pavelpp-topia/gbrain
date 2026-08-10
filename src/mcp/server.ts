@@ -6,6 +6,7 @@ import { operations } from '../core/operations.ts';
 import { VERSION } from '../version.ts';
 import { buildToolDefs } from './tool-defs.ts';
 import { dispatchToolCall, validateParams, buildOperationContext } from './dispatch.ts';
+import { filterOpsForSurface, allowedOpNames, type McpSurface } from './surface.ts';
 import { getBrainHotMemoryMeta } from '../core/facts/meta-hook.ts';
 import { loadConfig } from '../core/config.ts';
 import {
@@ -15,17 +16,24 @@ import {
 } from '../core/context/resolve-ipc.ts';
 import { resolveEntitiesToPointers, logDeliveredReflexPointers } from '../core/context/retrieval-reflex.ts';
 
-export async function startMcpServer(engine: BrainEngine) {
+export async function startMcpServer(engine: BrainEngine, opts: { surface?: McpSurface } = {}) {
   const server = new Server(
     { name: 'gbrain', version: VERSION },
     { capabilities: { tools: {} } },
   );
 
+  // MEMORY_VERBS v1 surface mode: 'full' (default — every op, byte-identical
+  // to pre-surface behavior) or 'verbs' (exactly the 5 protocol verbs).
+  // Enforced BOTH on the advertised list and in dispatch (fail-closed [c2]).
+  const surface: McpSurface = opts.surface ?? 'full';
+  const surfacedOps = filterOpsForSurface(operations, surface);
+  const allowedOps = surface === 'full' ? undefined : allowedOpNames(operations, surface);
+
   // Generate tool definitions from operations. Extracted to buildToolDefs so
   // the subagent tool registry (v0.15+) can call the same mapper against a
   // filtered OPERATIONS subset instead of duplicating this shape.
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
-    tools: buildToolDefs(operations),
+    tools: buildToolDefs(surfacedOps),
   }));
 
   // Dispatch tool calls via shared dispatch.ts (parity with HTTP transport).
@@ -35,6 +43,20 @@ export async function startMcpServer(engine: BrainEngine) {
   // shape and cast through `any` (the SDK accepts it via the ServerResult union).
   server.setRequestHandler(CallToolRequestSchema, async (request: any): Promise<any> => {
     const { name, arguments: params } = request.params;
+    // #3242: when the operator didn't pin a source via GBRAIN_SOURCE, stdio
+    // reads span every `config.federated = true` source (same visibility set
+    // as unqualified local CLI reads). GBRAIN_SOURCE set = explicit scope,
+    // no widening. Best-effort: a resolver failure keeps the scalar scope.
+    // ponytail: one tiny SELECT per tool call; cache it if it ever shows up.
+    let localFederated: string[] | undefined;
+    try {
+      const { localFederatedSourceIds } = await import('../core/source-resolver.ts');
+      localFederated = await localFederatedSourceIds(
+        engine,
+        process.env.GBRAIN_SOURCE || 'default',
+        process.env.GBRAIN_SOURCE ? 'env' : 'seed_default',
+      );
+    } catch { /* scalar scope stands */ }
     // v0.28: stdio MCP has no per-token auth (local pipe). Default the
     // takes-holder allow-list to ['world'] so agent-facing callers don't
     // see private hunches via takes_list / takes_search / query. Operators
@@ -42,15 +64,23 @@ export async function startMcpServer(engine: BrainEngine) {
     // `gbrain call <op>` (sets remote=false in src/cli.ts).
     return dispatchToolCall(engine, name, params, {
       remote: true,
+      // #1061: mark the transport so whoami can report {transport: 'stdio'}
+      // instead of throwing unknown_transport. Trust posture unchanged —
+      // stdio stays remote/untrusted.
+      transport: 'stdio',
       takesHoldersAllowList: ['world'],
       // v0.31: source defaults to 'default' for stdio (no per-token scope).
       // Operators who want a different source on stdio MCP should set
       // GBRAIN_SOURCE in the env or use --source via `gbrain call`.
       sourceId: process.env.GBRAIN_SOURCE || 'default',
+      ...(localFederated ? { localFederatedSourceIds: localFederated } : {}),
       // v0.31 (eD3): _meta.brain_hot_memory injection so Claude Desktop /
       // Code see the brain's relevant hot memory automatically alongside
       // every tool-call response. Best-effort; absorbs errors.
       metaHook: getBrainHotMemoryMeta,
+      // MEMORY_VERBS v1: fail-closed surface enforcement + usage attribution.
+      ...(allowedOps ? { allowedOps } : {}),
+      surface,
     });
   });
 
