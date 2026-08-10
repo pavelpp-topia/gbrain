@@ -91,6 +91,12 @@ const CODE_EXTENSIONS = new Set<string>([
   // symbol_name + symbol_type populated for code-def; DML chunks emit
   // unnamed so they don't pollute symbol search.
   '.sql',
+  // Groovy (Jenkins shared-library pipelines: vars/*.groovy, src/**) and Gradle
+  // build scripts. No tree-sitter grammar → recursive-chunker fallback, same as
+  // .tf/.hcl above: full-text/semantic search works; symbol-level code-def /
+  // callers do not. Closes the gap where jenkins-library's pipeline defs were
+  // invisible to sync.
+  '.groovy', '.gradle',
 ]);
 
 /**

@@ -83,6 +83,13 @@ describe('Layer 2 — isCodeFilePath widening', () => {
     expect(isCodeFilePath('Schema.SQL')).toBe(true); // case-insensitive
   });
 
+  // Groovy / Gradle: recursive-chunker fallback (no grammar), same as .tf/.hcl.
+  test('Groovy / Gradle classified as code', () => {
+    expect(isCodeFilePath('vars/javaTopiaOneApiPipeline.groovy')).toBe(true);
+    expect(isCodeFilePath('build.gradle')).toBe(true);
+    expect(isCodeFilePath('Vars/Pipeline.GROOVY')).toBe(true); // case-insensitive
+  });
+
   test('markdown is NOT classified as code', () => {
     expect(isCodeFilePath('docs/README.md')).toBe(false);
     expect(isCodeFilePath('docs/note.mdx')).toBe(false);
